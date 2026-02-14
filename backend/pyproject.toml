@@ -1,0 +1,20 @@
+[project]
+name = "stockbot-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "alembic>=1.16.5",
+    "anthropic>=0.79.0",
+    "apscheduler>=3.11.2",
+    "asyncpg>=0.31.0",
+    "bcrypt==4.2.1",
+    "fastapi[standard]>=0.128.8",
+    "httpx>=0.28.1",
+    "passlib[bcrypt]>=1.7.4",
+    "psycopg2-binary>=2.9.11",
+    "pydantic-settings>=2.11.0",
+    "python-jose[cryptography]>=3.5.0",
+    "sqlalchemy[asyncio]>=2.0.46",
+]

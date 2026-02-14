@@ -1,17 +1,26 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import auth, notifications, portfolios, recommendations, stocks
-from app.tasks.scheduler import start_scheduler, stop_scheduler
+from app.database import async_session
+from app.tasks.cleanup import run_cleanup
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    start_scheduler()
+    # Run data retention cleanup on startup
+    try:
+        async with async_session() as db:
+            results = await run_cleanup(db)
+            logger.info(f"Startup cleanup: {results}")
+    except Exception as e:
+        logger.warning(f"Startup cleanup failed (non-fatal): {e}")
     yield
-    stop_scheduler()
 
 
 app = FastAPI(

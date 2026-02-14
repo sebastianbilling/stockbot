@@ -4,11 +4,11 @@ import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { ArrowLeft, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, TrendingUp, TrendingDown } from "lucide-react";
 import Decimal from "decimal.js";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api-client";
-import { formatCurrency } from "@/lib/decimal";
+import { formatCurrency, formatPercent, calcPnL } from "@/lib/decimal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -18,7 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { StockSearch } from "@/components/stock-search";
 import { toast } from "sonner";
-import type { Portfolio, StockSearchResult } from "@/types";
+import type { Portfolio, StockSearchResult, LatestPrice } from "@/types";
 
 export default function PortfolioDetailPage() {
   const params = useParams();
@@ -38,6 +38,32 @@ export default function PortfolioDetailPage() {
     enabled: !!token,
   });
 
+  // Fetch live prices for all holdings in one batch call
+  const symbols = portfolio?.holdings.map((h) => h.stock.symbol) ?? [];
+  const { data: priceMap = {} } = useQuery({
+    queryKey: ["batchPrices", ...[...symbols].sort()],
+    queryFn: () => api.getBatchPrices(token!, symbols),
+    enabled: !!token && symbols.length > 0,
+    staleTime: 30 * 60 * 1000,
+  });
+
+  // Compute portfolio totals
+  let totalMarketValue = new Decimal(0);
+  let totalCostBasis = new Decimal(0);
+  portfolio?.holdings.forEach((h) => {
+    const price = priceMap[h.stock.symbol];
+    const cost = new Decimal(h.quantity).mul(h.avg_cost_basis);
+    totalCostBasis = totalCostBasis.plus(cost);
+    if (price) {
+      totalMarketValue = totalMarketValue.plus(new Decimal(h.quantity).mul(price.price));
+    }
+  });
+  const totalPnL = totalMarketValue.minus(totalCostBasis);
+  const totalPnLPercent = totalCostBasis.isZero()
+    ? new Decimal(0)
+    : totalPnL.div(totalCostBasis).mul(100);
+  const hasPrices = Object.keys(priceMap).length > 0;
+
   const addHoldingMutation = useMutation({
     mutationFn: () =>
       api.addHolding(token!, portfolioId, {
@@ -48,6 +74,7 @@ export default function PortfolioDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["portfolio", portfolioId] });
       queryClient.invalidateQueries({ queryKey: ["portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["batchPrices"] });
       setAddOpen(false);
       setSelectedStock(null);
       setQuantity("");
@@ -62,6 +89,7 @@ export default function PortfolioDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["portfolio", portfolioId] });
       queryClient.invalidateQueries({ queryKey: ["portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["batchPrices"] });
       toast.success("Holding removed");
     },
     onError: (err: Error) => toast.error(err.message),
@@ -201,6 +229,48 @@ export default function PortfolioDetailPage() {
         </div>
       </div>
 
+      {/* Portfolio summary cards */}
+      {portfolio.holdings.length > 0 && hasPrices && (
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Market Value</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">${formatCurrency(totalMarketValue.toString())}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Total Cost</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-bold">${formatCurrency(totalCostBasis.toString())}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Total P&L</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2">
+                {totalPnL.gte(0) ? (
+                  <TrendingUp className="h-5 w-5 text-green-500" />
+                ) : (
+                  <TrendingDown className="h-5 w-5 text-red-500" />
+                )}
+                <span className={`text-2xl font-bold ${totalPnL.gte(0) ? "text-green-500" : "text-red-500"}`}>
+                  ${formatCurrency(totalPnL.abs().toString())}
+                </span>
+                <span className={`text-sm ${totalPnL.gte(0) ? "text-green-500" : "text-red-500"}`}>
+                  ({formatPercent(totalPnLPercent.toString())})
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Holdings</CardTitle>
@@ -218,13 +288,16 @@ export default function PortfolioDetailPage() {
                   <TableHead>Name</TableHead>
                   <TableHead className="text-right">Shares</TableHead>
                   <TableHead className="text-right">Avg Cost</TableHead>
-                  <TableHead className="text-right">Total Cost</TableHead>
+                  <TableHead className="text-right">Price</TableHead>
+                  <TableHead className="text-right">Market Value</TableHead>
+                  <TableHead className="text-right">P&L</TableHead>
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {portfolio.holdings.map((h) => {
-                  const totalCost = new Decimal(h.quantity).mul(h.avg_cost_basis);
+                  const price = priceMap[h.stock.symbol];
+                  const pnl = price ? calcPnL(h.quantity, h.avg_cost_basis, price.price) : null;
                   return (
                     <TableRow key={h.id}>
                       <TableCell>
@@ -238,7 +311,32 @@ export default function PortfolioDetailPage() {
                       <TableCell className="text-muted-foreground">{h.stock.name}</TableCell>
                       <TableCell className="text-right">{formatCurrency(h.quantity)}</TableCell>
                       <TableCell className="text-right">${formatCurrency(h.avg_cost_basis)}</TableCell>
-                      <TableCell className="text-right">${formatCurrency(totalCost.toString())}</TableCell>
+                      <TableCell className="text-right">
+                        {price ? (
+                          <div>
+                            <span>${formatCurrency(price.price)}</span>
+                            {price.change_percent && (
+                              <span className={`ml-1 text-xs ${new Decimal(price.change_percent).gte(0) ? "text-green-500" : "text-red-500"}`}>
+                                {formatPercent(price.change_percent)}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <Skeleton className="ml-auto h-4 w-16" />
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {pnl ? `$${pnl.totalValue}` : <Skeleton className="ml-auto h-4 w-16" />}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {pnl ? (
+                          <span className={pnl.isPositive ? "text-green-500" : "text-red-500"}>
+                            {pnl.isPositive ? "+" : ""}${pnl.pnl} ({formatPercent(pnl.pnlPercent)})
+                          </span>
+                        ) : (
+                          <Skeleton className="ml-auto h-4 w-20" />
+                        )}
+                      </TableCell>
                       <TableCell className="text-right">
                         <Button
                           variant="ghost"

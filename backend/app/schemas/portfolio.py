@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from decimal import Decimal
+
+from pydantic import BaseModel, field_serializer
 
 
 class PortfolioCreate(BaseModel):
@@ -37,11 +39,15 @@ class StockInHolding(BaseModel):
 class HoldingResponse(BaseModel):
     id: uuid.UUID
     stock: StockInHolding
-    quantity: str
-    avg_cost_basis: str
+    quantity: Decimal
+    avg_cost_basis: Decimal
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("quantity", "avg_cost_basis")
+    def serialize_decimal(self, v: Decimal) -> str:
+        return str(v)
 
 
 class PortfolioResponse(BaseModel):

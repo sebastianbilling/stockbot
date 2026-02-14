@@ -100,6 +100,14 @@ export const api = {
   getPrice(token: string, symbol: string) {
     return request(`/api/stocks/${symbol}/price`, {}, token);
   },
+  getBatchPrices(token: string, symbols: string[]) {
+    const params = new URLSearchParams({ symbols: symbols.join(",") });
+    return request<Record<string, import("@/types").LatestPrice>>(
+      `/api/stocks/prices?${params}`,
+      {},
+      token
+    );
+  },
   getPriceHistory(token: string, symbol: string, period = "1M") {
     return request(`/api/stocks/${symbol}/history?period=${period}`, {}, token);
   },
@@ -115,8 +123,9 @@ export const api = {
   getRecommendation(token: string, id: string) {
     return request(`/api/recommendations/${id}`, {}, token);
   },
-  analyzeStock(token: string, symbol: string) {
-    return request(`/api/recommendations/analyze/${symbol}`, { method: "POST" }, token);
+  analyzeStock(token: string, symbol: string, force = false) {
+    const params = force ? "?force=true" : "";
+    return request(`/api/recommendations/analyze/${symbol}${params}`, { method: "POST" }, token);
   },
 
   // Notifications

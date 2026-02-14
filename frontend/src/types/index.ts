@@ -83,6 +83,7 @@ export interface Recommendation {
   reasoning?: string;
   model_version?: string;
   created_at: string;
+  cached?: boolean;
 }
 
 export interface NewsArticle {

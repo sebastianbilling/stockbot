@@ -92,10 +92,11 @@ async def get_recommendation(
 @router.post("/analyze/{symbol}")
 async def trigger_analysis(
     symbol: str,
+    force: bool = Query(False, description="Bypass 6h cache and force fresh analysis"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Rate limit: 10 per user per hour
+    # Rate limit: always enforced (counts actual analyses created in the last hour)
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     count_result = await db.execute(
         select(func.count())
@@ -106,4 +107,4 @@ async def trigger_analysis(
     if count >= 10:
         raise HTTPException(status_code=429, detail="Rate limit: max 10 analyses per hour")
 
-    return await analyze_stock(db, symbol, user.id)
+    return await analyze_stock(db, symbol, user.id, force=force)

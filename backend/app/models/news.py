@@ -18,6 +18,7 @@ class NewsArticle(UUIDMixin, TimestampMixin, Base):
     url: Mapped[Optional[str]] = mapped_column(String(1000))
     source: Mapped[Optional[str]] = mapped_column(String(100))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     stock_associations = relationship("NewsArticleStock", back_populates="news_article", cascade="all, delete-orphan")
 

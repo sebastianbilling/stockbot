@@ -2,10 +2,12 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Optional
 
 import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models.notification import Notification
@@ -15,15 +17,28 @@ from app.services.market_data import fetch_latest_price
 from app.services.news import fetch_news_for_symbol
 
 MODEL = "claude-haiku-4-5-20251001"
+CACHE_HOURS = 6
 
 
-async def analyze_stock(db: AsyncSession, symbol: str, user_id: uuid.UUID) -> dict:
-    """Run AI analysis on a stock and return a recommendation."""
+async def analyze_stock(
+    db: AsyncSession, symbol: str, user_id: uuid.UUID, force: bool = False
+) -> dict:
+    """Run AI analysis on a stock and return a recommendation.
+
+    Returns a cached recommendation if one exists within CACHE_HOURS,
+    unless force=True.
+    """
     symbol = symbol.upper()
+
+    # Check for recent cached recommendation
+    if not force:
+        cached = await _get_cached_recommendation(db, symbol, user_id)
+        if cached is not None:
+            return cached
 
     # Gather data
     price_data = await fetch_latest_price(db, symbol)
-    news = await fetch_news_for_symbol(db, symbol, limit=10)
+    news = await fetch_news_for_symbol(db, symbol, limit=5)
 
     # Get 30-day history from DB
     stock_result = await db.execute(select(Stock).where(Stock.symbol == symbol))
@@ -39,40 +54,29 @@ async def analyze_stock(db: AsyncSession, symbol: str, user_id: uuid.UUID) -> di
     )
     history = history_result.scalars().all()
 
-    history_text = "\n".join(
-        f"  {h.date}: O={h.open} H={h.high} L={h.low} C={h.close} V={h.volume}"
-        for h in history
-    )
+    # Summarize OHLCV instead of sending raw lines (saves ~800 tokens)
+    history_summary = _summarize_history(history)
 
     news_text = "\n".join(
-        f"  [{n['published_at'][:10]}] {n['headline']}"
-        for n in news[:10]
+        f"- [{n['published_at'][:10]}] {n['headline']}"
+        for n in news[:5]
     )
 
-    prompt = f"""Analyze the stock {symbol} ({stock.name}) and provide an investment recommendation.
+    prompt = f"""Analyze {symbol} ({stock.name}) for investment.
 
-Current price: ${price_data['price']}
-Previous close: ${price_data.get('previous_close', 'N/A')}
-Change: {price_data.get('change_percent', 'N/A')}%
+Price: ${price_data['price']} | Prev close: ${price_data.get('previous_close', 'N/A')} | Change: {price_data.get('change_percent', 'N/A')}%
 
-30-day OHLCV history:
-{history_text or '  No history available'}
+{history_summary}
 
-Recent news:
-{news_text or '  No recent news'}
+News:
+{news_text or 'No recent news'}
 
-Provide your analysis as JSON with these exact fields:
-- "action": one of "BUY", "SELL", or "HOLD"
-- "confidence": a number from 0 to 100
-- "summary": a one-sentence summary (max 200 chars)
-- "reasoning": detailed reasoning (2-4 paragraphs)
-
-IMPORTANT: This is for advisory purposes only. Respond ONLY with valid JSON, no markdown."""
+Respond ONLY with JSON: {{"action":"BUY|SELL|HOLD","confidence":0-100,"summary":"<max 200 chars>","reasoning":"<2-3 paragraphs>"}}"""
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -87,10 +91,11 @@ IMPORTANT: This is for advisory purposes only. Respond ONLY with valid JSON, no 
 
     analysis = json.loads(response_text)
 
-    # Store snapshot for auditability
+    # Store compact audit snapshot (what data the model saw)
     data_snapshot = {
-        "price": price_data,
-        "history_count": len(history),
+        "price": price_data.get("price"),
+        "previous_close": price_data.get("previous_close"),
+        "history_summary": history_summary,
         "news_count": len(news),
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -120,14 +125,64 @@ IMPORTANT: This is for advisory purposes only. Respond ONLY with valid JSON, no 
     await db.commit()
     await db.refresh(rec, ["stock"])
 
-    return {
+    return _rec_to_dict(rec, cached=False)
+
+
+async def _get_cached_recommendation(
+    db: AsyncSession, symbol: str, user_id: uuid.UUID
+) -> Optional[dict]:
+    """Return a recent recommendation if one exists within CACHE_HOURS."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=CACHE_HOURS)
+    result = await db.execute(
+        select(Recommendation)
+        .options(selectinload(Recommendation.stock))
+        .join(Stock)
+        .where(
+            Stock.symbol == symbol,
+            Recommendation.user_id == user_id,
+            Recommendation.created_at >= cutoff,
+        )
+        .order_by(Recommendation.created_at.desc())
+        .limit(1)
+    )
+    rec = result.scalar_one_or_none()
+    if rec is None:
+        return None
+    return _rec_to_dict(rec, cached=True)
+
+
+def _summarize_history(history) -> str:
+    """Summarize OHLCV data into a compact string instead of raw lines."""
+    if not history:
+        return "30-day history: No data available"
+
+    closes = [h.close for h in history]
+    volumes = [h.volume for h in history]
+    highs = [h.high for h in history]
+    lows = [h.low for h in history]
+
+    first_close = closes[0]
+    last_close = closes[-1]
+    change_pct = ((last_close - first_close) / first_close * 100).quantize(Decimal("0.01")) if first_close else 0
+    avg_vol = sum(volumes) // len(volumes) if volumes else 0
+
+    return (
+        f"30-day summary ({len(history)} trading days): "
+        f"Change {change_pct}% | "
+        f"High ${max(highs)} | Low ${min(lows)} | "
+        f"Avg volume {avg_vol:,}"
+    )
+
+
+def _rec_to_dict(rec: Recommendation, cached: bool = False) -> dict:
+    result = {
         "id": str(rec.id),
         "stock": {
-            "id": str(stock.id),
-            "symbol": stock.symbol,
-            "name": stock.name,
-            "exchange": stock.exchange,
-            "asset_type": stock.asset_type,
+            "id": str(rec.stock.id),
+            "symbol": rec.stock.symbol,
+            "name": rec.stock.name,
+            "exchange": rec.stock.exchange,
+            "asset_type": rec.stock.asset_type,
         },
         "action": rec.action,
         "confidence": str(rec.confidence),
@@ -135,4 +190,6 @@ IMPORTANT: This is for advisory purposes only. Respond ONLY with valid JSON, no 
         "reasoning": rec.reasoning,
         "model_version": rec.model_version,
         "created_at": rec.created_at.isoformat(),
+        "cached": cached,
     }
+    return result

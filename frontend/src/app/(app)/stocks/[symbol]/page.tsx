@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Loader2, Sparkles } from "lucide-react";
+import Decimal from "decimal.js";
+import { ArrowDown, ArrowUp, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api-client";
@@ -43,15 +44,20 @@ export default function StockDetailPage() {
   });
 
   const analyzeMutation = useMutation({
-    mutationFn: () => api.analyzeStock(token!, symbol) as Promise<Recommendation>,
+    mutationFn: (force?: boolean) => api.analyzeStock(token!, symbol, force) as Promise<Recommendation>,
     onSuccess: (data) => {
-      toast.success(`AI recommends: ${(data as Recommendation).action}`);
+      const rec = data as Recommendation;
+      if (rec.cached) {
+        toast.info(`Showing cached ${rec.action} recommendation`);
+      } else {
+        toast.success(`AI recommends: ${rec.action}`);
+      }
     },
     onError: (err: Error) => toast.error(err.message),
   });
 
   const changePercent = price?.change_percent;
-  const isPositive = changePercent ? parseFloat(changePercent) >= 0 : true;
+  const isPositive = changePercent ? new Decimal(changePercent).gte(0) : true;
 
   const chartData = history?.map((p) => ({
     date: p.date,
@@ -116,6 +122,20 @@ export default function StockDetailPage() {
               <span className="text-sm font-normal text-muted-foreground">
                 Confidence: {(analyzeMutation.data as Recommendation).confidence}%
               </span>
+              {(analyzeMutation.data as Recommendation).cached && (
+                <>
+                  <Badge variant="outline" className="text-xs">Cached</Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => analyzeMutation.mutate(true)}
+                    disabled={analyzeMutation.isPending}
+                  >
+                    <RefreshCw className="mr-1 h-3 w-3" />
+                    Re-analyze
+                  </Button>
+                </>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -144,29 +164,36 @@ export default function StockDetailPage() {
           ) : chartData && chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#888" opacity={0.2} />
                 <XAxis
                   dataKey="date"
-                  tick={{ fontSize: 12 }}
-                  className="text-muted-foreground"
+                  tick={{ fontSize: 12, fill: "#888" }}
+                  tickLine={{ stroke: "#888" }}
+                  axisLine={{ stroke: "#888" }}
                 />
                 <YAxis
-                  domain={["auto", "auto"]}
-                  tick={{ fontSize: 12 }}
-                  className="text-muted-foreground"
+                  domain={["dataMin - 2", "dataMax + 2"]}
+                  tick={{ fontSize: 12, fill: "#888" }}
+                  tickLine={{ stroke: "#888" }}
+                  axisLine={{ stroke: "#888" }}
+                  tickFormatter={(v: number) => `$${v.toFixed(0)}`}
                 />
                 <Tooltip
+                  formatter={(value: number) => [`$${value.toFixed(2)}`, "Close"]}
                   contentStyle={{
-                    backgroundColor: "hsl(var(--card))",
-                    border: "1px solid hsl(var(--border))",
+                    backgroundColor: "#000",
+                    border: "1px solid #333",
                     borderRadius: "8px",
+                    color: "#fff",
+                    padding: "8px 12px",
                   }}
-                  labelStyle={{ color: "hsl(var(--foreground))" }}
+                  labelStyle={{ color: "#aaa", marginBottom: "4px" }}
+                  itemStyle={{ color: "#fff" }}
                 />
                 <Line
                   type="monotone"
                   dataKey="close"
-                  stroke="hsl(var(--primary))"
+                  stroke="#2563eb"
                   strokeWidth={2}
                   dot={false}
                 />
